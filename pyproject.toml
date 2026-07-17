@@ -1,0 +1,25 @@
+[project]
+name = "energy-dashboard"
+version = "0.1.0"
+description = "Real-time electricity market dashboard for Czech Republic (ENTSO-E data)"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "entsoe-py>=0.7.0",
+    "pandas>=2.2.0",
+    "apscheduler>=3.10.4,<4",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[tool.uv]
+package = false

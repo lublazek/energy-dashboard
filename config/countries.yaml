@@ -1,0 +1,9 @@
+# Countries served by the dashboard.
+# code: ISO country code used in API URLs (?country=CZ)
+# bidding_zone: ENTSO-E area code (entsoe-py resolves "CZ" to 10YCZ-CEPS-----N)
+# enabled: only enabled countries get scheduled fetch jobs
+countries:
+  - code: CZ
+    name: Czech Republic
+    bidding_zone: CZ
+    enabled: true

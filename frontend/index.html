@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Energy Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Energy Dashboard</h1>
+            <div class="controls">
+                <label for="country-select">Country:</label>
+                <select id="country-select">
+                    <option value="CZ">Czech Republic</option>
+                </select>
+            </div>
+            <div class="status">
+                <span id="last-updated">Last updated: --</span>
+            </div>
+        </header>
+
+        <main>
+            <div class="charts-grid">
+                <div class="chart-wrapper">
+                    <div class="chart-header">
+                        <h2>Day-Ahead Prices</h2>
+                        <span class="stale-badge" id="prices-stale"></span>
+                    </div>
+                    <canvas id="prices-chart"></canvas>
+                </div>
+
+                <div class="chart-wrapper">
+                    <div class="chart-header">
+                        <h2>Total Load</h2>
+                        <span class="stale-badge" id="load-stale"></span>
+                    </div>
+                    <canvas id="load-chart"></canvas>
+                </div>
+
+                <div class="chart-wrapper">
+                    <div class="chart-header">
+                        <h2>Generation by Source</h2>
+                        <span class="stale-badge" id="generation-stale"></span>
+                    </div>
+                    <canvas id="generation-chart"></canvas>
+                </div>
+
+                <div class="chart-wrapper">
+                    <div class="chart-header">
+                        <h2>Imbalance Volumes</h2>
+                        <span class="stale-badge" id="imbalance-stale"></span>
+                    </div>
+                    <canvas id="imbalance-chart"></canvas>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
