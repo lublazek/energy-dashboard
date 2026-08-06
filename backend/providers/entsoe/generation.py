@@ -29,11 +29,22 @@ def normalize_generation(
 
     points = []
     for idx in df.index:
-        raw_sources = {}
+        raw_sources: dict[str, float] = {}
         for col in df.columns:
+            # entsoe-py returns a MultiIndex: (production_type, aggregation).
+            # Level 0 is the fuel name; level 1 is "Actual Aggregated" or
+            # "Actual Consumption". Consumption is load, not generation, so skip it.
+            if isinstance(col, tuple):
+                name, aggregation = col[0], (col[1] if len(col) > 1 else "")
+            else:
+                name, aggregation = col, ""
+
+            if aggregation == "Actual Consumption":
+                continue
+
             val = df.loc[idx, col]
             if pd.notna(val):
-                raw_sources[col] = float(val)
+                raw_sources[name] = raw_sources.get(name, 0.0) + float(val)
 
         if raw_sources:
             by_source = normalize_generation_sources(raw_sources)

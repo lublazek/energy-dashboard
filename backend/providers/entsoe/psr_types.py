@@ -1,63 +1,64 @@
-"""ENTSO-E PSR (Power System Resource) type code mappings."""
+"""ENTSO-E generation-type mappings.
 
-PSR_TYPE_MAP = {
-    "B01": "Biomass",
-    "B02": "Lignite",
-    "B03": "Coal",
-    "B04": "Natural gas",
-    "B05": "Nuclear",
-    "B06": "Hydro",
-    "B07": "Other",
-    "B08": "Solar",
-    "B09": "Wind",
-    "B10": "Waste",
-    "B11": "Hard coal",
-    "B12": "Other renewable",
+entsoe-py's `query_generation` returns human-readable production-type names as
+DataFrame column labels (e.g. "Nuclear", "Fossil Brown coal/Lignite"), NOT the
+raw PSR B-codes. So we map those names to our canonical frontend categories.
+"""
+
+# Canonical categories the frontend knows about (see GENERATION_COLORS in app.js).
+CANONICAL_SOURCES = (
+    "nuclear",
+    "lignite",
+    "hard_coal",
+    "gas",
+    "wind",
+    "solar",
+    "hydro",
+    "biomass",
+    "other",
+)
+
+# entsoe-py production-type name -> canonical category.
+# Anything not listed here falls through to "other".
+GENERATION_TYPE_MAP = {
+    "Biomass": "biomass",
+    "Fossil Brown coal/Lignite": "lignite",
+    "Fossil Coal-derived gas": "gas",
+    "Fossil Gas": "gas",
+    "Fossil Hard coal": "hard_coal",
+    "Fossil Oil": "other",
+    "Fossil Oil shale": "other",
+    "Fossil Peat": "other",
+    "Geothermal": "other",
+    "Hydro Pumped Storage": "hydro",
+    "Hydro Run-of-river and poundage": "hydro",
+    "Hydro Water Reservoir": "hydro",
+    "Marine": "other",
+    "Nuclear": "nuclear",
+    "Other": "other",
+    "Other renewable": "other",
+    "Solar": "solar",
+    "Waste": "other",
+    "Wind Offshore": "wind",
+    "Wind Onshore": "wind",
 }
 
 
-def psr_code_to_name(code: str) -> str:
-    """Convert PSR code to human-readable name."""
-    return PSR_TYPE_MAP.get(code, f"Unknown ({code})")
+def generation_type_to_category(name: str) -> str:
+    """Map an ENTSO-E production-type name to a canonical category."""
+    return GENERATION_TYPE_MAP.get(name, "other")
 
 
 def normalize_generation_sources(raw_sources: dict[str, float]) -> dict[str, float]:
-    """
-    Normalize generation source names from PSR codes to canonical names.
-    Groups sources into the standard categories.
-    """
-    normalized = {
-        "nuclear": 0.0,
-        "lignite": 0.0,
-        "hard_coal": 0.0,
-        "gas": 0.0,
-        "wind": 0.0,
-        "solar": 0.0,
-        "hydro": 0.0,
-        "biomass": 0.0,
-        "other": 0.0,
-    }
+    """Group raw per-production-type values into canonical categories.
 
-    for code, value in raw_sources.items():
-        name = psr_code_to_name(code)
+    `raw_sources` keys are ENTSO-E production-type names (e.g. "Nuclear");
+    values are MW. Returns a dict with every canonical category present.
+    """
+    normalized = {source: 0.0 for source in CANONICAL_SOURCES}
 
-        if code == "B05":
-            normalized["nuclear"] += value
-        elif code == "B02":
-            normalized["lignite"] += value
-        elif code == "B11" or code == "B03":
-            normalized["hard_coal"] += value
-        elif code == "B04":
-            normalized["gas"] += value
-        elif code == "B09":
-            normalized["wind"] += value
-        elif code == "B08":
-            normalized["solar"] += value
-        elif code in ["B06", "B12"]:
-            normalized["hydro"] += value if code == "B06" else 0.0
-        elif code == "B01":
-            normalized["biomass"] += value
-        else:
-            normalized["other"] += value
+    for name, value in raw_sources.items():
+        category = generation_type_to_category(name)
+        normalized[category] += value
 
     return normalized

@@ -19,10 +19,10 @@ _job_status: dict[str, dict] = {}
 def _get_fetch_interval_minutes(series: str) -> int:
     """Get fetch interval for each series in minutes."""
     intervals = {
-        "day_ahead_prices": 30,
+        "day_ahead_prices": 5,
         "load": 5,
         "generation": 5,
-        "imbalance": 15,
+        "imbalance": 5,
     }
     return intervals.get(series, 30)
 
@@ -109,9 +109,12 @@ async def init_scheduler(
                 name=f"Fetch {series} for {country}",
                 max_instances=1,
                 misfire_grace_time=60,
+                # Without this, an interval trigger first fires at now + interval,
+                # leaving the dashboard empty for up to 30 minutes after startup.
+                next_run_time=datetime.now(),
             )
 
-            logger.info(f"Scheduled fetch job for {series}:{country} every {interval_minutes}m")
+            logger.info(f"Scheduled fetch job for {series}:{country} every {interval_minutes}m (first run now)")
 
     _scheduler.start()
     logger.info("Scheduler started")
