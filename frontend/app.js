@@ -32,20 +32,33 @@ async function fetchCountries() {
   }
 }
 
-async function fetchData() {
+// Fetch one series. Never throws and never rejects: a failed series returns
+// null so it cannot take down the other three. A 404 means "nothing fetched
+// yet for this series" (see routes.py), which is a normal startup state.
+async function fetchSeries(path) {
   try {
-    const [prices, load, generation, imbalance] = await Promise.all([
-      fetch(`/api/prices?country=${currentCountry}`).then(r => r.json()),
-      fetch(`/api/load?country=${currentCountry}`).then(r => r.json()),
-      fetch(`/api/generation?country=${currentCountry}`).then(r => r.json()),
-      fetch(`/api/imbalance?country=${currentCountry}`).then(r => r.json()),
-    ]);
-
-    updateCharts(prices, load, generation, imbalance);
-    updateTimestamp();
+    const res = await fetch(`${path}?country=${currentCountry}`);
+    if (!res.ok) {
+      console.warn(`${path} returned HTTP ${res.status}`);
+      return null;
+    }
+    return await res.json();
   } catch (e) {
-    console.error('Error fetching data:', e);
+    console.error(`Error fetching ${path}:`, e);
+    return null;
   }
+}
+
+async function fetchData() {
+  const [prices, load, generation, imbalance] = await Promise.all([
+    fetchSeries('/api/prices'),
+    fetchSeries('/api/load'),
+    fetchSeries('/api/generation'),
+    fetchSeries('/api/imbalance'),
+  ]);
+
+  updateCharts(prices, load, generation, imbalance);
+  updateTimestamp();
 }
 
 function updateTimestamp() {
@@ -59,13 +72,41 @@ function formatDateTime(isoString) {
 }
 
 function updateCharts(prices, load, generation, imbalance) {
-  updatePricesChart(prices);
-  updateLoadChart(load);
-  updateGenerationChart(generation);
-  updateImbalanceChart(imbalance);
+  safeRender('prices', updatePricesChart, prices);
+  safeRender('load', updateLoadChart, load);
+  safeRender('generation', updateGenerationChart, generation);
+  safeRender('imbalance', updateImbalanceChart, imbalance);
+}
+
+// Render one chart in isolation, so an unexpected error in it (bad shape,
+// Chart.js blowing up) never stops the remaining charts from rendering.
+function safeRender(series, render, data) {
+  try {
+    render(data);
+  } catch (e) {
+    console.error(`Error rendering ${series} chart:`, e);
+    setBadge(series, '⚠️ Error');
+  }
+}
+
+// True only when `data` is a NormalizedSeries carrying at least one point.
+// Otherwise flags the chart and returns false — callers bail out early, which
+// leaves any previously rendered chart on screen instead of wiping it.
+function hasPoints(series, data) {
+  if (!data || !Array.isArray(data.points)) {
+    setBadge(series, '⚠️ Unavailable');
+    return false;
+  }
+  if (data.points.length === 0) {
+    setBadge(series, '⚠️ No data');
+    return false;
+  }
+  return true;
 }
 
 function updatePricesChart(data) {
+  if (!hasPoints('prices', data)) return;
+
   const labels = data.points.map(p => formatDateTime(p.t));
   const values = data.points.map(p => p.v);
 
@@ -100,6 +141,8 @@ function updatePricesChart(data) {
 }
 
 function updateLoadChart(data) {
+  if (!hasPoints('load', data)) return;
+
   const labels = data.points.map(p => formatDateTime(p.t));
   const values = data.points.map(p => p.v);
 
@@ -134,6 +177,8 @@ function updateLoadChart(data) {
 }
 
 function updateGenerationChart(data) {
+  if (!hasPoints('generation', data)) return;
+
   const labels = data.points.map(p => formatDateTime(p.t));
   const sources = Object.keys(GENERATION_COLORS);
 
@@ -166,6 +211,8 @@ function updateGenerationChart(data) {
 }
 
 function updateImbalanceChart(data) {
+  if (!hasPoints('imbalance', data)) return;
+
   const labels = data.points.map(p => formatDateTime(p.t));
   const values = data.points.map(p => p.v);
   const colors = values.map(v => v >= 0 ? '#4CAF50' : '#FF5252');
@@ -202,9 +249,16 @@ function updateImbalanceChart(data) {
 }
 
 function updateStaleBadge(series, data) {
+  setBadge(series, data.stale ? '⚠️ Stale' : null);
+}
+
+// Show `text` in the chart's badge, or hide the badge when text is null.
+function setBadge(series, text) {
   const badge = document.getElementById(`${series}-stale`);
-  if (data.stale) {
-    badge.textContent = '⚠️ Stale';
+  if (!badge) return;
+
+  if (text) {
+    badge.textContent = text;
     badge.style.display = 'inline';
   } else {
     badge.style.display = 'none';

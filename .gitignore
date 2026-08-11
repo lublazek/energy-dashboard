@@ -30,6 +30,8 @@ env/
 .env
 .env.local
 
+scratch/
+
 .pytest_cache/
 .coverage
 htmlcov/
