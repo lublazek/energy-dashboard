@@ -38,7 +38,10 @@ htmlcov/
 
 .vscode/
 .idea/
+.claude/agents/
 *.swp
 *.swo
 
 .DS_Store
+
+docs/local/

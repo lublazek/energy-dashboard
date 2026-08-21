@@ -13,9 +13,10 @@ plain HTML/JS with Chart.js — no database, no build step.
 2. ```bash
    uv sync
    cp .env.example .env   # fill in ENTSOE_API_KEY
-   uv run uvicorn backend.main:app
+   uv run uvicorn backend.main:app   # don't use --reload, pandas triggers a watch loop
    ```
-3. Open http://127.0.0.1:8000
+3. Open http://127.0.0.1:8000 — the dashboard is served by the backend, so don't open
+   `frontend/index.html` directly.
 
 ## Project layout
 
@@ -23,6 +24,11 @@ plain HTML/JS with Chart.js — no database, no build step.
 backend/    FastAPI app, scheduler, ENTSO-E provider, in-memory storage
 frontend/   index.html + app.js (Chart.js) + style.css
 config/     countries.yaml — enabled countries and bidding zones
+docs/       architecture and ENTSO-E data source reference
 ```
 
-See [CLAUDE.md](CLAUDE.md) for architecture details and development notes.
+## Documentation
+
+- [CLAUDE.md](CLAUDE.md) — architecture overview and the `NormalizedSeries` contract.
+- [docs/entsoe.md](docs/entsoe.md) — ENTSO-E series mapping, DataFrame shapes, platform quirks.
+- [docs/architecture.md](docs/architecture.md) — configuration, fetch lifecycle, design decisions.
