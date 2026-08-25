@@ -74,6 +74,20 @@ in `app.js`:
 
 `nuclear`, `lignite`, `hard_coal`, `gas`, `wind`, `solar`, `hydro`, `biomass`, `other`
 
+## Tests
+
+`uv run pytest` — no network, no API key, ~1 s. Scope is `normalize_generation` only and that is
+deliberate; do not add route/scheduler/frontend tests without being asked.
+
+`tests/entsoe_frames.py` builds entsoe-py-shaped fixtures and is expected to be **thrown away** if
+the provider moves to the raw REST API; `tests/test_normalize_generation.py` asserts on the
+`NormalizedSeries` contract and must survive that move. Keep new tests on the right side of that
+line — assert on canonical output, not on entsoe-py shapes, unless the quirk *is* the subject.
+
+Note `by_source` always contains every canonical category (seeded to `0.0`), so it cannot express
+"missing" — a test that tries to assert NaN-vs-zero there passes against broken code. Check
+`_generation_columns` directly instead. See [docs/architecture.md](docs/architecture.md#testing).
+
 ## Further reading
 
 - [docs/entsoe.md](docs/entsoe.md) — ENTSO-E data source mapping, DataFrame shapes returned by

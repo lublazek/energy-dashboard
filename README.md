@@ -28,6 +28,19 @@ plain HTML/JS with Chart.js — no database, no build step.
 4. Open http://127.0.0.1:8000 — the dashboard is served by the backend, so don't open
    `frontend/index.html` directly.
 
+## Tests
+
+```bash
+uv run pytest
+```
+
+No network and no API key needed — the normalizers are pure functions, so the tests feed them
+fake DataFrames and check the `NormalizedSeries` that comes out. Takes about a second; worth
+running before a commit.
+
+Coverage is deliberately narrow: `normalize_generation` only, because that is where the provider
+quirks concentrate. See [docs/architecture.md](docs/architecture.md#testing).
+
 ## Project layout
 
 ```
@@ -35,6 +48,7 @@ backend/    FastAPI app, scheduler, ENTSO-E provider, in-memory storage
 frontend/   index.html + app.js (Chart.js) + style.css
 config/     countries.yaml — enabled countries and bidding zones
 docs/       architecture and ENTSO-E data source reference
+tests/      pytest suite for the normalizers
 ```
 
 ## Documentation

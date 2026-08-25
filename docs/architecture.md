@@ -95,3 +95,30 @@ the flag.
 
 **404 means "nothing fetched yet".** `routes.py` returns 404 when the store holds nothing for a
 series. It's a data-availability signal, not a routing error. `/api/health` tells you why.
+
+## Testing
+
+`uv run pytest`. The suite covers `normalize_generation` and nothing else, on purpose: normalizers
+are pure functions (DataFrame in, `NormalizedSeries` out) so they need no network, no scheduler and
+no FastAPI, and they are where every provider quirk is concentrated. Route, scheduler and frontend
+tests are out of scope for Phase 1.
+
+The suite is split along the line that matters for Phase 2:
+
+- `tests/entsoe_frames.py` — builders producing **entsoe-py-shaped** DataFrames (tz-aware index;
+  flat or `(production_type, aggregation)` MultiIndex columns). This file is the one that dies if
+  the project drops entsoe-py for the raw REST API.
+- `tests/test_normalize_generation.py` — assertions on the **`NormalizedSeries` contract**, which
+  is provider-independent. These survive a provider swap untouched, which makes them the safety
+  net for that migration: swap the implementation, and the tests say whether the canonical output
+  still holds.
+
+Two consequences worth knowing before adding tests here:
+
+- **`by_source` cannot distinguish NaN from 0.0.** `normalize_generation_sources` seeds every
+  canonical category to `0.0`, so a test asserting "a missing fuel is not zero" passes against
+  broken code. The effect of `min_count=1` is only observable on `_generation_columns` directly,
+  or indirectly through `_trim_ragged_tail`.
+- **A test is not finished until you have watched it fail.** Both invariants above were verified by
+  deliberately breaking `normalizers.py` and confirming the suite went red — removing `min_count=1`
+  fails two tests, removing the `"Actual Consumption"` skip inflates hydro 5×.
