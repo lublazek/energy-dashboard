@@ -22,6 +22,7 @@ CANONICAL_SOURCES = (
 # Anything not listed here falls through to "other".
 GENERATION_TYPE_MAP = {
     "Biomass": "biomass",
+    "Energy storage": "other",
     "Fossil Brown coal/Lignite": "lignite",
     "Fossil Coal-derived gas": "gas",
     "Fossil Gas": "gas",

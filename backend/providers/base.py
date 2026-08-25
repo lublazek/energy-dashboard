@@ -9,10 +9,6 @@ class Provider(Protocol):
 
     name: str
 
-    async def supports(self, series: str, country: str) -> bool:
-        """Check if this provider can fetch the given series for the given country."""
-        ...
-
     async def fetch(
         self,
         series: str,

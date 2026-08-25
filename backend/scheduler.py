@@ -1,16 +1,16 @@
 """APScheduler setup for background data fetching jobs."""
 
 import logging
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
-import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from backend.providers.base import Provider
 from backend.storage import Storage
 
 logger = logging.getLogger(__name__)
+
+SERIES_LIST = ("day_ahead_prices", "load", "generation", "imbalance")
 
 _scheduler: AsyncIOScheduler | None = None
 _job_status: dict[str, dict] = {}
@@ -27,15 +27,32 @@ def _get_fetch_interval_minutes(series: str) -> int:
     return intervals.get(series, 30)
 
 
-def _get_lookback_hours(series: str) -> int:
+def _get_lookback_hours(series: str, default_hours: int) -> int:
     """Get lookback window for each series in hours."""
     lookbacks = {
         "day_ahead_prices": 48,
-        "load": 24,
-        "generation": 24,
-        "imbalance": 24,
     }
-    return lookbacks.get(series, 24)
+    return lookbacks.get(series, default_hours)
+
+
+def _get_lookahead_hours(series: str) -> int:
+    """Get forward window for each series in hours.
+
+    Day-ahead prices are published for tomorrow, around midday. entsoe-py
+    truncates the response to the requested window, so an end of "now" fetches
+    those future prices and then throws them away — leaving the day-ahead chart
+    showing only history, which is the one thing it is not for.
+    """
+    return 24 if series == "day_ahead_prices" else 0
+
+
+def _blank_status() -> dict:
+    return {
+        "last_fetch_attempt_utc": None,
+        "last_fetch_success_utc": None,
+        "last_error": None,
+        "provider_used": None,
+    }
 
 
 async def _fetch_job(
@@ -43,68 +60,62 @@ async def _fetch_job(
     country: str,
     provider: Provider,
     storage: Storage,
+    history_window_hours: int,
 ) -> None:
     """Scheduled job that fetches data for a (series, country) pair."""
     job_key = f"{series}:{country}"
+    status = _job_status.setdefault(job_key, _blank_status())
 
-    if job_key not in _job_status:
-        _job_status[job_key] = {
-            "last_fetch_attempt_utc": None,
-            "last_fetch_success_utc": None,
-            "last_error": None,
-            "provider_used": None,
-        }
+    now = datetime.now(timezone.utc)
+    status["last_fetch_attempt_utc"] = now
 
-    _job_status[job_key]["last_fetch_attempt_utc"] = datetime.utcnow()
-
-    lookback_hours = _get_lookback_hours(series)
-    end = datetime.utcnow()
-    start = end - timedelta(hours=lookback_hours)
+    start = now - timedelta(hours=_get_lookback_hours(series, history_window_hours))
+    end = now + timedelta(hours=_get_lookahead_hours(series))
 
     try:
         logger.debug(f"Fetching {series} for {country} from {provider.name}")
         result = await provider.fetch(series, country, start, end)
         await storage.store(result)
-        _job_status[job_key]["last_fetch_success_utc"] = datetime.utcnow()
-        _job_status[job_key]["last_error"] = None
-        _job_status[job_key]["provider_used"] = provider.name
+        status["last_fetch_success_utc"] = datetime.now(timezone.utc)
+        status["last_error"] = None
+        status["provider_used"] = provider.name
         logger.info(f"Successfully fetched {series} for {country} from {provider.name}")
     except Exception as e:
-        _job_status[job_key]["last_error"] = str(e)
+        status["last_error"] = str(e)
         logger.error(f"Failed to fetch {series} for {country}: {e}")
 
 
 async def init_scheduler(
     storage: Storage,
     provider: Provider,
-    countries_config_path: Path,
+    countries_config: dict,
+    history_window_hours: int,
 ) -> AsyncIOScheduler:
     """Initialize and return the APScheduler scheduler."""
     global _scheduler
 
     _scheduler = AsyncIOScheduler()
 
-    with open(countries_config_path) as f:
-        countries_data = yaml.safe_load(f)
-
     enabled_countries = [
         c["code"]
-        for c in countries_data.get("countries", [])
+        for c in countries_config.get("countries", [])
         if c.get("enabled", False)
     ]
 
-    series_list = ["day_ahead_prices", "load", "generation", "imbalance"]
-
-    for series in series_list:
+    for series in SERIES_LIST:
         for country in enabled_countries:
             interval_minutes = _get_fetch_interval_minutes(series)
             job_key = f"{series}:{country}"
+
+            # Registered up front so /api/health lists every job from the first
+            # request, instead of looking like nothing was ever scheduled.
+            _job_status[job_key] = _blank_status()
 
             _scheduler.add_job(
                 _fetch_job,
                 "interval",
                 minutes=interval_minutes,
-                args=[series, country, provider, storage],
+                args=[series, country, provider, storage, history_window_hours],
                 id=job_key,
                 name=f"Fetch {series} for {country}",
                 max_instances=1,
@@ -125,15 +136,12 @@ async def shutdown_scheduler() -> None:
     """Shutdown the scheduler."""
     global _scheduler
     if _scheduler:
-        _scheduler.shutdown(wait=True)
+        # AsyncIOExecutor ignores wait= entirely: it cancels pending futures and
+        # returns. Passing wait=True would only imply a guarantee we don't get.
+        _scheduler.shutdown(wait=False)
         logger.info("Scheduler shutdown")
-
-
-def get_scheduler() -> AsyncIOScheduler | None:
-    """Get the global scheduler instance."""
-    return _scheduler
 
 
 def get_job_status() -> dict[str, dict]:
     """Get status of all scheduled jobs."""
-    return dict(_job_status)
+    return {job_key: dict(status) for job_key, status in _job_status.items()}

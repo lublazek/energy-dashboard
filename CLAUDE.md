@@ -24,23 +24,27 @@ Scheduler (APScheduler interval jobs) → ENTSOEProvider.fetch() → normalizer 
 Frontend (polls 60 s) ← /api/prices|load|generation|imbalance ← Storage.get() ← InMemoryStore
 ```
 
-- `backend/main.py` — lifespan startup: loads settings + `config/countries.yaml`, creates
-  storage, provider, scheduler; mounts `frontend/` as static files at `/`. **The dashboard is
-  served by the backend — never open `index.html` directly.**
+- `backend/main.py` — lifespan startup: loads settings + `config/countries.yaml` (parsed **once**
+  and passed as a dict to routes, provider and scheduler), creates storage, provider, scheduler;
+  mounts `frontend/` as static files at `/`. **The dashboard is served by the backend — never open
+  `index.html` directly.** No CORS middleware: the frontend is same-origin by construction.
 - `backend/scheduler.py` — one interval job per (series, country), keyed `"{series}:{country}"`.
   Jobs pass `next_run_time=datetime.now()` so they fire at startup rather than after one full
   interval. A failed fetch is recorded in `_job_status` and logged — it never crashes the scheduler.
+  Day-ahead prices are the only series with a forward window (`_get_lookahead_hours`).
 - `backend/providers/base.py` — the `Provider` protocol.
 - `backend/providers/entsoe/` — `client.py` wraps entsoe-py queries and does no transformation;
-  `provider.py` dispatches by series name; `prices.py` / `load.py` / `generation.py` /
-  `imbalance.py` normalize raw DataFrames; `psr_types.py` maps generation types to canonical
-  categories.
-- `backend/storage.py` — `Storage` protocol + thread-safe `InMemoryStore` (data is lost on restart).
-- `backend/api/routes.py` — serves the latest stored series and computes `age_seconds` / `stale`
-  (stale = older than 1 h). Returns **404 when the store is empty for that series** — a 404 here
-  means "nothing fetched yet", not a routing bug.
-- `backend/api/health.py` — `/api/health`, last attempt/success/error per job. First stop when
-  charts are empty.
+  `provider.py` dispatches by series name and runs the blocking call via `asyncio.to_thread`;
+  `normalizers.py` holds `normalize_scalar_series()` (prices/load/imbalance) and
+  `normalize_generation()`; `psr_types.py` maps generation types to canonical categories.
+- `backend/storage.py` — `Storage` protocol + thread-safe `InMemoryStore` (data is lost on
+  restart). The lock is load-bearing: fetches run on a worker thread.
+- `backend/api/routes.py` — serves the latest stored series and returns a **copy** annotated with
+  `age_seconds` / `stale` (stale = older than 1 h), leaving the stored object untouched. Returns
+  **404 when the store is empty for that series** — a 404 here means "nothing fetched yet", not a
+  routing bug.
+- `backend/api/health.py` — `/api/health`, last attempt/success/error per job, with an overall
+  status derived from them (`starting` / `degraded` / `ok`). First stop when charts are empty.
 
 ### Where transformation belongs
 
@@ -56,10 +60,10 @@ Defined as Pydantic models in `backend/models.py`:
 ```python
 {
   "country": "CZ", "series": "day_ahead_prices", "unit": "EUR/MWh",
-  "resolution_minutes": 60,
+  "resolution_minutes": 60,            # measured from the index, not declared
   "points": [{"t": datetime, "v": float | None, "by_source": dict | None}],
   "latest": Point | None,
-  "fetched_at": datetime | None,
+  "fetched_at": datetime | None,       # timezone-aware UTC
   "stale": bool, "age_seconds": int,   # filled by routes.py, not the normalizers
 }
 ```

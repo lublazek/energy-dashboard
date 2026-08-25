@@ -11,8 +11,9 @@ const GENERATION_COLORS = {
 };
 
 const POLL_INTERVAL_MS = 60000;
-let currentCountry = 'CZ';
+let currentCountry = null;
 let charts = {};
+let inFlight = false;
 
 async function fetchCountries() {
   try {
@@ -24,9 +25,14 @@ async function fetchCountries() {
       const option = document.createElement('option');
       option.value = country.code;
       option.textContent = country.name;
-      if (country.code === 'CZ') option.selected = true;
       select.appendChild(option);
     });
+    // The backend decides the default (DEFAULT_COUNTRY); fall back to whatever
+    // it listed first. Hardcoding 'CZ' here would 404 every chart the moment
+    // countries.yaml enables a different single country.
+    const codes = data.countries.map(c => c.code);
+    currentCountry = codes.includes(data.default) ? data.default : codes[0];
+    select.value = currentCountry;
   } catch (e) {
     console.error('Error fetching countries:', e);
   }
@@ -35,9 +41,9 @@ async function fetchCountries() {
 // Fetch one series. Never throws and never rejects: a failed series returns
 // null so it cannot take down the other three. A 404 means "nothing fetched
 // yet for this series" (see routes.py), which is a normal startup state.
-async function fetchSeries(path) {
+async function fetchSeries(path, country) {
   try {
-    const res = await fetch(`${path}?country=${currentCountry}`);
+    const res = await fetch(`${path}?country=${country}`);
     if (!res.ok) {
       console.warn(`${path} returned HTTP ${res.status}`);
       return null;
@@ -50,15 +56,32 @@ async function fetchSeries(path) {
 }
 
 async function fetchData() {
-  const [prices, load, generation, imbalance] = await Promise.all([
-    fetchSeries('/api/prices'),
-    fetchSeries('/api/load'),
-    fetchSeries('/api/generation'),
-    fetchSeries('/api/imbalance'),
-  ]);
+  if (inFlight) return;
+  inFlight = true;
 
-  updateCharts(prices, load, generation, imbalance);
-  updateTimestamp();
+  // Pinned for the whole batch: switching country mid-flight must not repaint
+  // the charts with the country we just navigated away from.
+  const country = currentCountry;
+  if (!country) {
+    inFlight = false;
+    return;
+  }
+
+  try {
+    const [prices, load, generation, imbalance] = await Promise.all([
+      fetchSeries('/api/prices', country),
+      fetchSeries('/api/load', country),
+      fetchSeries('/api/generation', country),
+      fetchSeries('/api/imbalance', country),
+    ]);
+
+    if (country !== currentCountry) return;
+
+    updateCharts(prices, load, generation, imbalance);
+    updateTimestamp();
+  } finally {
+    inFlight = false;
+  }
 }
 
 function updateTimestamp() {
@@ -66,9 +89,18 @@ function updateTimestamp() {
   document.getElementById('last-updated').textContent = `Last updated: ${now.toLocaleTimeString()}`;
 }
 
+// Axis ticks carry the time only — one full locale datetime per point is ~20
+// characters of mostly redundant date. The full value moves to the tooltip.
+function formatTime(isoString) {
+  return new Date(isoString).toLocaleTimeString('cs-CZ', {
+    timeZone: 'Europe/Prague',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function formatDateTime(isoString) {
-  const date = new Date(isoString);
-  return date.toLocaleString('cs-CZ', { timeZone: 'Europe/Prague' });
+  return new Date(isoString).toLocaleString('cs-CZ', { timeZone: 'Europe/Prague' });
 }
 
 function updateCharts(prices, load, generation, imbalance) {
@@ -104,148 +136,95 @@ function hasPoints(series, data) {
   return true;
 }
 
-function updatePricesChart(data) {
-  if (!hasPoints('prices', data)) return;
+// Create the chart on first render, mutate it on every later one. Chart.js
+// keeps its own canvas state, so rebuilding each poll would leak instances.
+function drawChart(series, type, data, datasets, { stacked = false } = {}) {
+  const labels = data.points.map(p => formatTime(p.t));
+  const fullLabels = data.points.map(p => formatDateTime(p.t));
 
-  const labels = data.points.map(p => formatDateTime(p.t));
-  const values = data.points.map(p => p.v);
-
-  if (!charts.prices) {
-    const ctx = document.getElementById('prices-chart').getContext('2d');
-    charts.prices = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [{
-          label: 'EUR/MWh',
-          data: values,
-          borderColor: '#FF6384',
-          backgroundColor: 'rgba(255, 99, 132, 0.1)',
-          tension: 0.1,
-          fill: true,
-        }],
-      },
+  if (!charts[series]) {
+    const ctx = document.getElementById(`${series}-chart`).getContext('2d');
+    charts[series] = new Chart(ctx, {
+      type,
+      data: { labels, datasets },
       options: {
         responsive: true,
-        plugins: { legend: { display: true } },
-        scales: { y: { beginAtZero: true } },
+        plugins: {
+          legend: { display: true },
+          tooltip: {
+            callbacks: {
+              // Ticks show time only, so the tooltip carries the date.
+              title: items => items[0]?.chart.data.fullLabels?.[items[0].dataIndex] ?? '',
+            },
+          },
+        },
+        scales: {
+          x: { stacked },
+          y: { stacked, beginAtZero: true },
+        },
       },
     });
   } else {
-    charts.prices.data.labels = labels;
-    charts.prices.data.datasets[0].data = values;
-    charts.prices.update();
+    charts[series].data.labels = labels;
+    charts[series].data.datasets = datasets;
   }
 
-  updateStaleBadge('prices', data);
+  charts[series].data.fullLabels = fullLabels;
+  charts[series].update();
+  updateStaleBadge(series, data);
+}
+
+function updatePricesChart(data) {
+  if (!hasPoints('prices', data)) return;
+  drawChart('prices', 'line', data, [{
+    label: 'EUR/MWh',
+    data: data.points.map(p => p.v),
+    borderColor: '#FF6384',
+    backgroundColor: 'rgba(255, 99, 132, 0.1)',
+    tension: 0.1,
+    fill: true,
+  }]);
 }
 
 function updateLoadChart(data) {
   if (!hasPoints('load', data)) return;
-
-  const labels = data.points.map(p => formatDateTime(p.t));
-  const values = data.points.map(p => p.v);
-
-  if (!charts.load) {
-    const ctx = document.getElementById('load-chart').getContext('2d');
-    charts.load = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [{
-          label: 'MW',
-          data: values,
-          borderColor: '#36A2EB',
-          backgroundColor: 'rgba(54, 162, 235, 0.1)',
-          tension: 0.1,
-          fill: true,
-        }],
-      },
-      options: {
-        responsive: true,
-        plugins: { legend: { display: true } },
-        scales: { y: { beginAtZero: true } },
-      },
-    });
-  } else {
-    charts.load.data.labels = labels;
-    charts.load.data.datasets[0].data = values;
-    charts.load.update();
-  }
-
-  updateStaleBadge('load', data);
+  drawChart('load', 'line', data, [{
+    label: 'MW',
+    data: data.points.map(p => p.v),
+    borderColor: '#36A2EB',
+    backgroundColor: 'rgba(54, 162, 235, 0.1)',
+    tension: 0.1,
+    fill: true,
+  }]);
 }
 
 function updateGenerationChart(data) {
   if (!hasPoints('generation', data)) return;
 
-  const labels = data.points.map(p => formatDateTime(p.t));
-  const sources = Object.keys(GENERATION_COLORS);
-
-  const datasets = sources.map(source => ({
+  const datasets = Object.keys(GENERATION_COLORS).map(source => ({
     label: source.charAt(0).toUpperCase() + source.slice(1),
-    data: data.points.map(p => p.by_source?.[source] || 0),
+    data: data.points.map(p => p.by_source?.[source] ?? 0),
     borderColor: GENERATION_COLORS[source],
     backgroundColor: GENERATION_COLORS[source],
     borderWidth: 0,
   }));
 
-  if (!charts.generation) {
-    const ctx = document.getElementById('generation-chart').getContext('2d');
-    charts.generation = new Chart(ctx, {
-      type: 'bar',
-      data: { labels, datasets },
-      options: {
-        responsive: true,
-        plugins: { legend: { display: true } },
-        scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } },
-      },
-    });
-  } else {
-    charts.generation.data.labels = labels;
-    charts.generation.data.datasets = datasets;
-    charts.generation.update();
-  }
-
-  updateStaleBadge('generation', data);
+  drawChart('generation', 'bar', data, datasets, { stacked: true });
 }
 
 function updateImbalanceChart(data) {
   if (!hasPoints('imbalance', data)) return;
 
-  const labels = data.points.map(p => formatDateTime(p.t));
   const values = data.points.map(p => p.v);
   const colors = values.map(v => v >= 0 ? '#4CAF50' : '#FF5252');
 
-  if (!charts.imbalance) {
-    const ctx = document.getElementById('imbalance-chart').getContext('2d');
-    charts.imbalance = new Chart(ctx, {
-      type: 'bar',
-      data: {
-        labels,
-        datasets: [{
-          label: 'MW',
-          data: values,
-          backgroundColor: colors,
-          borderColor: colors,
-          borderWidth: 0,
-        }],
-      },
-      options: {
-        responsive: true,
-        plugins: { legend: { display: true } },
-        scales: { y: { beginAtZero: true } },
-      },
-    });
-  } else {
-    charts.imbalance.data.labels = labels;
-    charts.imbalance.data.datasets[0].data = values;
-    charts.imbalance.data.datasets[0].backgroundColor = colors;
-    charts.imbalance.data.datasets[0].borderColor = colors;
-    charts.imbalance.update();
-  }
-
-  updateStaleBadge('imbalance', data);
+  drawChart('imbalance', 'bar', data, [{
+    label: 'MW',
+    data: values,
+    backgroundColor: colors,
+    borderColor: colors,
+    borderWidth: 0,
+  }]);
 }
 
 function updateStaleBadge(series, data) {
@@ -270,7 +249,21 @@ document.getElementById('country-select').addEventListener('change', (e) => {
   fetchData();
 });
 
+function showFatal(message) {
+  document.getElementById('last-updated').textContent = message;
+  ['prices', 'load', 'generation', 'imbalance'].forEach(s => setBadge(s, '⚠️ Error'));
+}
+
 async function init() {
+  // Chart.js comes from a CDN. If it failed to load, every `new Chart` throws
+  // and safeRender paints four identical badges that look like a backend
+  // problem — so say what actually happened instead.
+  if (typeof Chart === 'undefined') {
+    console.error('Chart.js failed to load from the CDN.');
+    showFatal('Charting library failed to load — check your network connection.');
+    return;
+  }
+
   await fetchCountries();
   await fetchData();
   setInterval(fetchData, POLL_INTERVAL_MS);

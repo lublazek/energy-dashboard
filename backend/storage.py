@@ -16,13 +16,13 @@ class Storage(Protocol):
         """Retrieve the latest normalized series."""
         ...
 
-    async def get_all(self) -> dict[tuple[str, str], NormalizedSeries]:
-        """Retrieve all stored series as {(country, series): NormalizedSeries}."""
-        ...
-
 
 class InMemoryStore:
-    """Thread-safe in-memory storage for normalized series."""
+    """Thread-safe in-memory storage for normalized series.
+
+    The lock is load-bearing: provider fetches run on a worker thread via
+    asyncio.to_thread, so a store can land while a request is reading.
+    """
 
     def __init__(self) -> None:
         self._data: dict[tuple[str, str], NormalizedSeries] = {}
@@ -38,8 +38,3 @@ class InMemoryStore:
         """Retrieve a normalized series from memory."""
         with self._lock:
             return self._data.get((country, series_name))
-
-    async def get_all(self) -> dict[tuple[str, str], NormalizedSeries]:
-        """Retrieve all stored series."""
-        with self._lock:
-            return dict(self._data)

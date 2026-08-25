@@ -10,12 +10,22 @@ plain HTML/JS with Chart.js — no database, no build step.
 ## Run it
 
 1. Get a free API key from ENTSO-E (email transparency@entsoe.eu after registering).
-2. ```bash
+2. Create a `.env` in the project root — it is gitignored, and is the only place the key
+   belongs:
+   ```
+   ENTSOE_API_KEY=your-key-here
+   DEFAULT_COUNTRY=CZ
+   HISTORY_WINDOW_HOURS=24
+   LOG_LEVEL=INFO
+   ```
+   Only `ENTSOE_API_KEY` is required; see [docs/architecture.md](docs/architecture.md) for
+   what the rest do. Keep `LOG_LEVEL` at `INFO` — `DEBUG` makes entsoe-py log the full
+   request URL, which contains your key.
+3. ```bash
    uv sync
-   cp .env.example .env   # fill in ENTSOE_API_KEY
    uv run uvicorn backend.main:app   # don't use --reload, pandas triggers a watch loop
    ```
-3. Open http://127.0.0.1:8000 — the dashboard is served by the backend, so don't open
+4. Open http://127.0.0.1:8000 — the dashboard is served by the backend, so don't open
    `frontend/index.html` directly.
 
 ## Project layout

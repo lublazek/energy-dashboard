@@ -21,7 +21,16 @@ async def health() -> dict:
             "provider_used": info.get("provider_used"),
         }
 
+    # Derived, not asserted: this endpoint is the first stop when charts are
+    # empty, so a hardcoded "ok" would be worse than no endpoint at all.
+    if not jobs:
+        overall = "starting"
+    elif any(j["last_error"] or not j["last_fetch_success_utc"] for j in jobs.values()):
+        overall = "degraded"
+    else:
+        overall = "ok"
+
     return {
-        "status": "ok",
+        "status": overall,
         "jobs": jobs,
     }
