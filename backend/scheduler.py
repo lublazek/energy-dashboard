@@ -10,7 +10,7 @@ from backend.storage import Storage
 
 logger = logging.getLogger(__name__)
 
-SERIES_LIST = ("day_ahead_prices", "load", "generation", "imbalance")
+SERIES_LIST = ("day_ahead_prices", "load", "generation", "imbalance", "imbalance_prices")
 
 _scheduler: AsyncIOScheduler | None = None
 _job_status: dict[str, dict] = {}
@@ -23,6 +23,7 @@ def _get_fetch_interval_minutes(series: str) -> int:
         "load": 5,
         "generation": 5,
         "imbalance": 5,
+        "imbalance_prices": 5,
     }
     return intervals.get(series, 30)
 
@@ -38,10 +39,10 @@ def _get_lookback_hours(series: str, default_hours: int) -> int:
 def _get_lookahead_hours(series: str) -> int:
     """Get forward window for each series in hours.
 
-    Day-ahead prices are published for tomorrow, around midday. entsoe-py
-    truncates the response to the requested window, so an end of "now" fetches
-    those future prices and then throws them away — leaving the day-ahead chart
-    showing only history, which is the one thing it is not for.
+    Day-ahead prices are published for tomorrow, around midday. With an end of
+    "now" the request window would exclude those future prices entirely —
+    leaving the day-ahead chart showing only history, which is the one thing
+    it is not for.
     """
     return 24 if series == "day_ahead_prices" else 0
 
@@ -102,6 +103,7 @@ async def init_scheduler(
         if c.get("enabled", False)
     ]
 
+    job_index = 0
     for series in SERIES_LIST:
         for country in enabled_countries:
             interval_minutes = _get_fetch_interval_minutes(series)
@@ -120,10 +122,13 @@ async def init_scheduler(
                 name=f"Fetch {series} for {country}",
                 max_instances=1,
                 misfire_grace_time=60,
-                # Without this, an interval trigger first fires at now + interval,
-                # leaving the dashboard empty for up to 30 minutes after startup.
-                next_run_time=datetime.now(),
+                # Fire at startup rather than after one full interval — but
+                # staggered: every series×country job firing in the same
+                # instant makes ENTSO-E respond slowly enough to trip the 30 s
+                # read timeout on some of them.
+                next_run_time=datetime.now() + timedelta(seconds=2 * job_index),
             )
+            job_index += 1
 
             logger.info(f"Scheduled fetch job for {series}:{country} every {interval_minutes}m (first run now)")
 

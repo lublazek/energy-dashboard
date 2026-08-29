@@ -1,36 +1,36 @@
-"""Tests for `normalize_generation`.
+"""Tests for the generation pipeline: XML → parse → NormalizedSeries.
 
 These assert on the `NormalizedSeries` contract (canonical category keys,
-tz-aware `fetched_at`, `latest`, `by_source` instead of `v`) rather than on
-anything entsoe-py-shaped. The entsoe-py-shaped part lives in
-`entsoe_frames.py`, so a move to the raw REST API means rewriting the builders
-there, not these assertions.
+tz-aware `fetched_at`, `latest`, `by_source` instead of `v`) — the shape a
+second provider would have to reproduce. The ENTSO-E-shaped half lives in
+`entsoe_xml.py`, so a change in the upstream format means rewriting the
+builders there, not these assertions.
 
-The one exception is `test_actual_consumption_is_not_generation`, which is
-about a column label entsoe-py invents. Under the raw API the same rule is
-enforced by `inBiddingZone` vs `outBiddingZone` (docs/entsoe.md §7) — the rule
-survives, the fixture does not.
+The assertions here survived the entsoe-py → raw REST migration unchanged;
+only the fixture half was swapped. That is the split working as intended.
 """
 
-import pandas as pd
+from datetime import timedelta
 
-from backend.providers.entsoe.normalizers import (
-    _generation_columns,
-    normalize_generation,
-)
+from backend.providers.entsoe.normalizers import normalize_generation
 from backend.providers.entsoe.psr_types import CANONICAL_SOURCES
-from tests.entsoe_frames import flat_frame, index_at, multi_frame
+from backend.providers.entsoe.xml_parsers import parse_generation_xml
+from tests.entsoe_xml import START, ack_no_data, gen_timeseries, gl_document
 
-NAN = float("nan")
+
+def from_xml(*timeseries: str):
+    """Run the real pipeline: fixture XML → parser → normalizer."""
+    return normalize_generation(parse_generation_xml(gl_document(*timeseries)), "CZ")
 
 
 # --- 1. happy path ----------------------------------------------------------
 
 
-def test_flat_columns_map_to_canonical_categories():
-    df = flat_frame({"Nuclear": [2000.0, 2100.0], "Solar": [500.0, 600.0]})
-
-    result = normalize_generation(df, "CZ")
+def test_psr_codes_map_to_canonical_categories():
+    result = from_xml(
+        gen_timeseries("B14", [2000.0, 2100.0]),  # Nuclear
+        gen_timeseries("B16", [500.0, 600.0]),    # Solar
+    )
 
     assert result.country == "CZ"
     assert result.series == "generation"
@@ -49,9 +49,7 @@ def test_flat_columns_map_to_canonical_categories():
 
 
 def test_latest_is_the_last_point_and_fetched_at_is_utc_aware():
-    df = flat_frame({"Nuclear": [2000.0, 2100.0]})
-
-    result = normalize_generation(df, "CZ")
+    result = from_xml(gen_timeseries("B14", [2000.0, 2100.0]))
 
     assert result.latest == result.points[-1]
     assert result.latest.by_source["nuclear"] == 2100.0
@@ -64,17 +62,13 @@ def test_latest_is_the_last_point_and_fetched_at_is_utc_aware():
 # --- 2. consumption is not generation ---------------------------------------
 
 
-def test_actual_consumption_is_not_generation():
+def test_consumption_is_not_generation():
     """Pumped storage drawing power is load. Counting it inflates hydro."""
-    df = multi_frame(
-        {
-            ("Nuclear", "Actual Aggregated"): [2000.0],
-            ("Hydro Pumped Storage", "Actual Aggregated"): [100.0],
-            ("Hydro Pumped Storage", "Actual Consumption"): [400.0],
-        }
+    result = from_xml(
+        gen_timeseries("B14", [2000.0]),
+        gen_timeseries("B10", [100.0]),                     # Hydro Pumped Storage, generating
+        gen_timeseries("B10", [400.0], consumption=True),   # …and drawing power
     )
-
-    result = normalize_generation(df, "CZ")
 
     assert result.points[0].by_source["hydro"] == 100.0  # not 500.0, not -300.0
 
@@ -82,10 +76,11 @@ def test_actual_consumption_is_not_generation():
 # --- 3. many production types, one category ---------------------------------
 
 
-def test_onshore_and_offshore_wind_are_summed():
-    df = flat_frame({"Wind Onshore": [300.0], "Wind Offshore": [200.0]})
-
-    result = normalize_generation(df, "CZ")
+def test_offshore_and_onshore_wind_are_summed():
+    result = from_xml(
+        gen_timeseries("B18", [200.0]),  # Wind Offshore
+        gen_timeseries("B19", [300.0]),  # Wind Onshore
+    )
 
     assert result.points[0].by_source["wind"] == 500.0
 
@@ -93,11 +88,12 @@ def test_onshore_and_offshore_wind_are_summed():
 # --- 4. unknown fuels ---------------------------------------------------------
 
 
-def test_unknown_production_type_falls_through_to_other():
+def test_unknown_psr_code_falls_through_to_other():
     """A new ENTSO-E fuel must not crash the fetch, and must not vanish."""
-    df = flat_frame({"Nuclear": [2000.0], "Antimatter": [50.0]})
-
-    result = normalize_generation(df, "CZ")
+    result = from_xml(
+        gen_timeseries("B14", [2000.0]),
+        gen_timeseries("B23", [50.0]),  # not in PSR_CODE_MAP
+    )
 
     assert result.points[0].by_source["other"] == 50.0
     assert result.points[0].by_source["nuclear"] == 2000.0
@@ -113,61 +109,34 @@ def test_trailing_incomplete_row_is_dropped():
     partly filled. Emitting them would show gas at 0.0 — indistinguishable from
     a plant genuinely off, and it silently understates `latest`.
     """
-    df = flat_frame(
-        {
-            "Nuclear": [2000.0, 2000.0, 2000.0],
-            "Solar": [500.0, 500.0, 500.0],
-            "Fossil Gas": [300.0, 300.0, NAN],
-        }
+    result = from_xml(
+        gen_timeseries("B14", [2000.0, 2000.0, 2000.0]),
+        gen_timeseries("B16", [500.0, 500.0, 500.0]),
+        gen_timeseries("B04", [300.0, 300.0]),  # gas ends one interval early
     )
 
-    result = normalize_generation(df, "CZ")
-
     assert len(result.points) == 2
-    assert result.latest.t == index_at(3)[1].to_pydatetime()
+    assert result.latest.t == START + timedelta(minutes=15)
     assert result.latest.by_source["gas"] == 300.0
 
 
-def test_permanently_absent_fuel_does_not_trigger_trimming():
-    """`expected` is the mode of fuels-reporting, so a fuel that never reports
-    is simply never expected — it must not eat the whole dataset."""
-    df = flat_frame(
-        {
-            "Nuclear": [2000.0, 2000.0, 2000.0],
-            "Marine": [NAN, NAN, NAN],
-        }
+def test_mostly_absent_fuel_does_not_trigger_trimming():
+    """`expected` is the mode of fuels-reporting, so a fuel present for only a
+    sliver of the window must not eat the whole dataset."""
+    result = from_xml(
+        gen_timeseries("B14", [2000.0, 2000.0, 2000.0]),
+        gen_timeseries("B13", [5.0]),  # Marine, reports the first interval only
     )
-
-    result = normalize_generation(df, "CZ")
 
     assert len(result.points) == 3
 
 
-# --- 6. NaN must survive the column flattening -------------------------------
+# --- 6. empty input ----------------------------------------------------------
 
 
-def test_missing_fuel_stays_nan_rather_than_zero():
-    """This is what `min_count=1` in `_generation_columns` protects.
-
-    Asserted on the helper, not on `normalize_generation`: by the time a point
-    is built, `normalize_generation_sources` has seeded every category to 0.0,
-    so NaN and 0.0 are indistinguishable in `by_source`. The difference is only
-    visible here — and it is what lets `_trim_ragged_tail` count correctly.
-    """
-    df = flat_frame({"Nuclear": [2000.0, 2000.0], "Fossil Gas": [300.0, NAN]})
-
-    gen = _generation_columns(df)
-
-    assert pd.isna(gen["Fossil Gas"].iloc[1])
-    assert gen["Fossil Gas"].iloc[0] == 300.0
-
-
-# --- 7. empty input ----------------------------------------------------------
-
-
-def test_empty_frame_yields_a_valid_empty_series():
+def test_no_matching_data_yields_a_valid_empty_series():
     """An empty fetch is normal (nothing published yet), not an error."""
-    result = normalize_generation(pd.DataFrame(), "CZ")
+    result = normalize_generation(parse_generation_xml(ack_no_data()), "CZ")
 
     assert result.points == []
     assert result.latest is None
@@ -177,19 +146,15 @@ def test_empty_frame_yields_a_valid_empty_series():
     assert result.fetched_at.tzinfo is not None
 
 
-# --- 8. resolution ------------------------------------------------------------
+# --- 7. resolution ------------------------------------------------------------
 
 
 def test_resolution_is_measured_from_the_index():
     """Declared resolutions drift (SDAC moved day-ahead to 15 min), so the
-    index is the source of truth while entsoe-py is in the way.
+    measured spacing is the source of truth. The parser fills omitted
+    positions, so within a Period the spacing is dense and honest."""
+    quarter_hourly = from_xml(gen_timeseries("B14", [2000.0] * 3, resolution="PT15M"))
+    hourly = from_xml(gen_timeseries("B14", [2000.0] * 3, resolution="PT60M"))
 
-    NOTE: this becomes wrong under the raw REST API, which declares
-    <resolution>PT15M</resolution> and omits empty positions — measuring the
-    spacing would then read a gap as a longer resolution. See docs/entsoe.md.
-    """
-    quarter_hourly = flat_frame({"Nuclear": [2000.0, 2000.0, 2000.0]}, minutes=15)
-    hourly = flat_frame({"Nuclear": [2000.0, 2000.0, 2000.0]}, minutes=60)
-
-    assert normalize_generation(quarter_hourly, "CZ").resolution_minutes == 15
-    assert normalize_generation(hourly, "CZ").resolution_minutes == 60
+    assert quarter_hourly.resolution_minutes == 15
+    assert hourly.resolution_minutes == 60

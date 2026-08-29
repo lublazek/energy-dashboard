@@ -4,24 +4,29 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## What this is
 
-**Energy Dashboard** — a real-time electricity market monitor for the Czech Republic (Phase 1).
-It fetches four data series from the ENTSO-E Transparency Platform (day-ahead prices, total load,
-generation by source, imbalance volumes), stores them in memory, and renders them as live charts.
+**Energy Dashboard** — a real-time electricity market monitor for the Czech Republic and its
+neighbours, extended to wider Central Europe (CZ, DE, AT, PL, SK, HU, SI, HR, RO, CH, FR, NL, BE
+— the set lives in `config/countries.yaml`, not in code). It fetches five data series per country
+from the ENTSO-E
+Transparency Platform (day-ahead prices, total load, generation by source, imbalance volumes,
+imbalance prices), stores them in memory, and renders them as live charts.
 
-**Stack**: Python 3.13 + FastAPI + APScheduler + entsoe-py; Chart.js via CDN. No database, no
-build step.
+**Stack**: Python 3.13 + FastAPI + APScheduler; the ENTSO-E data comes from the **raw REST API**
+(`requests` + stdlib `xml.etree`) — the entsoe-py library was deliberately removed. Chart.js via
+CDN. No database, no build step.
 
-**Scope**: Phase 2+ (multi-country, per-TSO providers, database persistence, statistics,
-customizable landing-page graphs) is deliberately out of scope. The `Provider`/`Storage`
-protocols and the `NormalizedSeries` contract are the only forward-compatibility kept. Do not
-add a provider registry or routing layer — the scheduler calls `ENTSOEProvider` directly.
+**Scope**: Phase 2+ (per-TSO providers, database persistence, statistics, customizable
+landing-page graphs) is deliberately out of scope. The `Provider`/`Storage` protocols and the
+`NormalizedSeries` contract are the only forward-compatibility kept. Do not add a provider
+registry or routing layer — the scheduler calls `ENTSOEProvider` directly.
 
 ## Architecture
 
 ```
-Scheduler (APScheduler interval jobs) → ENTSOEProvider.fetch() → normalizer → NormalizedSeries
-                                                                                    ↓
-Frontend (polls 60 s) ← /api/prices|load|generation|imbalance ← Storage.get() ← InMemoryStore
+Scheduler (interval job per series×country) → ENTSOEProvider.fetch() → ENTSOERawClient (HTTP)
+                                                   → xml_parsers → normalizers → NormalizedSeries
+                                                                                       ↓
+Frontend (polls 60 s) ← /api/prices|load|generation|imbalance|imbalance_prices ← InMemoryStore
 ```
 
 - `backend/main.py` — lifespan startup: loads settings + `config/countries.yaml` (parsed **once**
@@ -33,25 +38,31 @@ Frontend (polls 60 s) ← /api/prices|load|generation|imbalance ← Storage.get(
   interval. A failed fetch is recorded in `_job_status` and logged — it never crashes the scheduler.
   Day-ahead prices are the only series with a forward window (`_get_lookahead_hours`).
 - `backend/providers/base.py` — the `Provider` protocol.
-- `backend/providers/entsoe/` — `client.py` wraps entsoe-py queries and does no transformation;
-  `provider.py` dispatches by series name and runs the blocking call via `asyncio.to_thread`;
-  `normalizers.py` holds `normalize_scalar_series()` (prices/load/imbalance) and
-  `normalize_generation()`; `psr_types.py` maps generation types to canonical categories.
+- `backend/providers/entsoe/` — `raw_client.py` does HTTP only and returns a **list** of XML
+  documents (the platform zips multi-document responses — balancing data routinely arrives as
+  `PK…` zip bytes; the token travels only in the `SECURITY_TOKEN` header, never the URL);
+  `xml_parsers.py` holds all XML knowledge (namespace handling, position math, omitted-position
+  fill, consumption exclusion, multi-document merge); `normalizers.py` turns parsed pandas
+  objects into `NormalizedSeries`; `psr_types.py` maps psrType B-codes to canonical categories;
+  `provider.py` dispatches by series name and runs the blocking HTTP call via `asyncio.to_thread`.
 - `backend/storage.py` — `Storage` protocol + thread-safe `InMemoryStore` (data is lost on
-  restart). The lock is load-bearing: fetches run on a worker thread.
+  restart).
 - `backend/api/routes.py` — serves the latest stored series and returns a **copy** annotated with
   `age_seconds` / `stale` (stale = older than 1 h), leaving the stored object untouched. Returns
   **404 when the store is empty for that series** — a 404 here means "nothing fetched yet", not a
   routing bug.
 - `backend/api/health.py` — `/api/health`, last attempt/success/error per job, with an overall
   status derived from them (`starting` / `degraded` / `ok`). First stop when charts are empty.
+- `config/countries.yaml` — one entry per country with the **EIC area code** the raw API
+  addresses it by. Germany uses the DE-LU bidding zone EIC (ENTSO-E aggregates the four German
+  TSOs into it). An enabled country without an `eic` fails at startup, on purpose.
 
 ### Where transformation belongs
 
-`client.py` returns raw provider data; `app.js` renders canonical data. **All provider quirks are
-absorbed in the normalizers.** Never push ENTSO-E-specific naming into the frontend — `app.js`
-drives its datasets off the canonical category keys in `GENERATION_COLORS`, and a second provider
-must be able to emit the same keys.
+`raw_client.py` returns raw XML text; `app.js` renders canonical data. **All provider quirks are
+absorbed in the parsers and normalizers.** Never push ENTSO-E-specific naming into the frontend —
+`app.js` drives its datasets off the canonical category keys in `GENERATION_COLORS`, and a second
+provider must be able to emit the same keys.
 
 ### NormalizedSeries contract
 
@@ -68,30 +79,31 @@ Defined as Pydantic models in `backend/models.py`:
 }
 ```
 
-A point carries **either** `v` (prices, load, imbalance) **or** `by_source` (generation) — never
-both. Generation `by_source` keys are the canonical categories, and must match `GENERATION_COLORS`
-in `app.js`:
+A point carries **either** `v` (prices, load, imbalance volumes/prices) **or** `by_source`
+(generation) — never both. Generation `by_source` keys are the canonical categories, and must
+match `GENERATION_COLORS` in `app.js`:
 
 `nuclear`, `lignite`, `hard_coal`, `gas`, `wind`, `solar`, `hydro`, `biomass`, `other`
 
 ## Tests
 
-`uv run pytest` — no network, no API key, ~1 s. Scope is `normalize_generation` only and that is
-deliberate; do not add route/scheduler/frontend tests without being asked.
+`uv run pytest` — no network, no API key, ~1 s. Scope is the parsers and normalizers only, and
+that is deliberate; do not add route/scheduler/frontend tests without being asked.
 
-`tests/entsoe_frames.py` builds entsoe-py-shaped fixtures and is expected to be **thrown away** if
-the provider moves to the raw REST API; `tests/test_normalize_generation.py` asserts on the
-`NormalizedSeries` contract and must survive that move. Keep new tests on the right side of that
-line — assert on canonical output, not on entsoe-py shapes, unless the quirk *is* the subject.
+`tests/entsoe_xml.py` builds raw-API-shaped XML fixtures and dies with the upstream format;
+`tests/test_normalize_generation.py` / `test_normalize_scalar.py` assert on the
+`NormalizedSeries` contract and must survive a provider change. Keep new tests on the right side
+of that line — assert on canonical output, not on ENTSO-E shapes, unless the quirk *is* the
+subject (those belong in `tests/test_xml_parsers.py`).
 
 Note `by_source` always contains every canonical category (seeded to `0.0`), so it cannot express
-"missing" — a test that tries to assert NaN-vs-zero there passes against broken code. Check
-`_generation_columns` directly instead. See [docs/architecture.md](docs/architecture.md#testing).
+"missing" — assert NaN-vs-zero on the parser output instead. See
+[docs/architecture.md](docs/architecture.md#testing).
 
 ## Further reading
 
-- [docs/entsoe.md](docs/entsoe.md) — ENTSO-E data source mapping, DataFrame shapes returned by
-  each entsoe-py call, and the provider quirks the normalizers exist to absorb. **Read this
+- [docs/entsoe.md](docs/entsoe.md) — the raw ENTSO-E REST API: endpoint catalogue, request
+  anatomy, response shapes, and the platform quirks the parsers exist to absorb. **Read this
   before touching anything under `backend/providers/entsoe/`.**
 - [docs/architecture.md](docs/architecture.md) — configuration, request/fetch lifecycle, and
   design decisions in more depth.

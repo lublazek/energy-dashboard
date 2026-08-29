@@ -596,25 +596,39 @@ The full EIC register is published separately by ENTSO-E; this project keeps the
 
 ## 7. What this project uses
 
-Four series, all currently fetched through the `entsoe-py` library rather than direct HTTP.
-`backend/providers/entsoe/client.py` wraps the library calls and performs no transformation; the
-normalizers absorb every quirk.
+Five series, fetched through the **raw REST API** (`requests` + stdlib XML) —
+`backend/providers/entsoe/raw_client.py` does the HTTP, `xml_parsers.py` the parsing, and the
+normalizers absorb every remaining quirk. entsoe-py was removed on 2026-08-25.
 
-| Series | Library call | Equivalent raw request | Keyed by |
+| Series | Raw request | Value element | Response root |
 |---|---|---|---|
-| `day_ahead_prices` | `query_day_ahead_prices` | `documentType=A44`, `in_Domain` = `out_Domain` | bidding zone |
-| `load` | `query_load` | `documentType=A65&processType=A16`, `outBiddingZone_Domain` | country |
-| `generation` | `query_generation` (`psr_type=None`) | `documentType=A75&processType=A16`, `in_Domain` | country |
-| `imbalance` | `query_imbalance_volumes` | `documentType=A86`, `controlArea_Domain` | bidding zone |
+| `day_ahead_prices` | `documentType=A44`, `in_Domain` = `out_Domain` | `price.amount` | `Publication_MarketDocument` |
+| `load` | `documentType=A65&processType=A16`, `outBiddingZone_Domain` | `quantity` | `GL_MarketDocument` |
+| `generation` | `documentType=A75&processType=A16`, `in_Domain` | `quantity` | `GL_MarketDocument` |
+| `imbalance` | `documentType=A86`, `controlArea_Domain` | `quantity` | `Balancing_MarketDocument` |
+| `imbalance_prices` | `documentType=A85`, `controlArea_Domain` | `imbalance_Price.amount` | `Balancing_MarketDocument` |
 
-Note the split in the last column: prices and imbalance are **bidding-zone** concepts, load and
-generation are **country** concepts. `ENTSOEProvider.fetch()` passes the right one to each. For CZ
-the two strings happen to be identical, so a mix-up here stays invisible until a second country is
-added.
+Every enabled country carries one `eic` in `config/countries.yaml` that serves all five domain
+parameters. Germany uses the DE-LU bidding-zone EIC (`10Y1001A1001A82H`) — ENTSO-E aggregates the
+four German TSO control areas into it, imbalance included.
 
-### Going direct when the library breaks
+Quirks the code absorbs, learned by running it:
 
-Every one of these is reachable with `requests` + an XML parse — no library needed:
+- **Multi-document responses arrive zipped.** When the window spans several documents — routine
+  for A85/A86 — the body is a zip archive (`PK…` magic) whose members are one XML document each.
+  `raw_client._get` detects and unpacks this; the `parse_*_documents` wrappers merge the members,
+  later documents winning on overlapping timestamps.
+- **Imbalance volumes are published unsigned**, with the sign in the TimeSeries'
+  `flowDirection.direction` (`A01` = surplus → positive, `A02` = deficit → negated).
+- **Imbalance prices are settled in the national currency** — CZK for ČEPS, PLN for PSE — carried
+  in `currency_Unit.name`. The unit is read from the response, never declared.
+- **Omitted positions repeat the previous value** (see below); the parser fills them, so NaN in
+  parsed output means "this TimeSeries genuinely ends here", which is what the ragged-tail trim
+  keys on.
+
+### The raw request
+
+Every series is reachable with `requests` + an XML parse — no library needed:
 
 ```python
 import requests
@@ -635,13 +649,15 @@ if "No matching data found" in r.text:
     ...   # valid query, no data
 ```
 
-The response is a `GL_MarketDocument` (or `Publication_MarketDocument` for prices) containing
-`TimeSeries` → `Period` → `Point` elements, each with a `position` and a value. `position` is a
-1-based index into the period, not a timestamp — you reconstruct the timestamp from the period's
-`start` plus `resolution` (e.g. `PT60M`, `PT15M`) times `position - 1`. **Positions with no value
-are omitted**, meaning a gap repeats the previous value rather than being missing.
+The response is a `GL_MarketDocument` (or `Publication_MarketDocument` for prices,
+`Balancing_MarketDocument` for imbalance) containing `TimeSeries` → `Period` → `Point` elements,
+each with a `position` and a value. `position` is a 1-based index into the period, not a
+timestamp — you reconstruct the timestamp from the period's `start` plus `resolution` (e.g.
+`PT60M`, `PT15M`) times `position - 1`. **Positions with no value are omitted**, meaning a gap
+repeats the previous value rather than being missing — `xml_parsers._walk_period` implements
+exactly this fill, extending a trailing omission to the period's end.
 
-### The MultiIndex quirk is an entsoe-py artifact, not the API
+### The MultiIndex quirk was an entsoe-py artifact, not the API (historical)
 
 Worth being precise about, since it shapes `normalize_generation`. The raw API returns
 `TimeSeries` elements each carrying a `psrType` B-code. **`entsoe-py` reshapes that** into a
@@ -665,9 +681,12 @@ columns = MultiIndex([('Nuclear',              'Actual Aggregated'),
 - The column set varies by country and window. Types with no output may be absent entirely rather
   than present-and-zero, so never index columns positionally.
 
-If this project ever drops `entsoe-py`, all of the above disappears and is replaced by reading
-`psrType` B-codes straight off the XML — at which point `GENERATION_TYPE_MAP` should be re-keyed
-by B-code, which is the more stable identifier anyway.
+**This happened on 2026-08-25**: the project dropped `entsoe-py`, reads `psrType` B-codes
+straight off the XML, and `psr_types.PSR_CODE_MAP` is keyed by B-code — the more stable
+identifier. The consumption exclusion survives in a different form: a generation `TimeSeries`
+carrying `outBiddingZone_Domain.mRID` is pumped storage drawing power and
+`xml_parsers.parse_generation_xml` skips it. The section above is kept as a record of why the
+old code looked the way it did.
 
 ---
 

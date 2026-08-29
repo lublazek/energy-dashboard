@@ -64,6 +64,12 @@ async def get_imbalance(country: str = Query("CZ")) -> NormalizedSeries:
     return await _serve(country, "imbalance")
 
 
+@router.get("/imbalance_prices")
+async def get_imbalance_prices(country: str = Query("CZ")) -> NormalizedSeries:
+    """Get imbalance prices."""
+    return await _serve(country, "imbalance_prices")
+
+
 @router.get("/countries")
 async def get_countries() -> dict:
     """Get list of enabled countries."""

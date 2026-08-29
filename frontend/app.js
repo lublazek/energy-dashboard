@@ -68,16 +68,17 @@ async function fetchData() {
   }
 
   try {
-    const [prices, load, generation, imbalance] = await Promise.all([
+    const [prices, load, generation, imbalance, imbalancePrices] = await Promise.all([
       fetchSeries('/api/prices', country),
       fetchSeries('/api/load', country),
       fetchSeries('/api/generation', country),
       fetchSeries('/api/imbalance', country),
+      fetchSeries('/api/imbalance_prices', country),
     ]);
 
     if (country !== currentCountry) return;
 
-    updateCharts(prices, load, generation, imbalance);
+    updateCharts(prices, load, generation, imbalance, imbalancePrices);
     updateTimestamp();
   } finally {
     inFlight = false;
@@ -103,11 +104,12 @@ function formatDateTime(isoString) {
   return new Date(isoString).toLocaleString('cs-CZ', { timeZone: 'Europe/Prague' });
 }
 
-function updateCharts(prices, load, generation, imbalance) {
+function updateCharts(prices, load, generation, imbalance, imbalancePrices) {
   safeRender('prices', updatePricesChart, prices);
   safeRender('load', updateLoadChart, load);
   safeRender('generation', updateGenerationChart, generation);
   safeRender('imbalance', updateImbalanceChart, imbalance);
+  safeRender('imbalance_prices', updateImbalancePricesChart, imbalancePrices);
 }
 
 // Render one chart in isolation, so an unexpected error in it (bad shape,
@@ -227,6 +229,20 @@ function updateImbalanceChart(data) {
   }]);
 }
 
+function updateImbalancePricesChart(data) {
+  if (!hasPoints('imbalance_prices', data)) return;
+  drawChart('imbalance_prices', 'line', data, [{
+    // Imbalance prices are settled in the national currency (CZK for CZ,
+    // PLN for PL), so the label must come from the data.
+    label: data.unit || 'per MWh',
+    data: data.points.map(p => p.v),
+    borderColor: '#9966FF',
+    backgroundColor: 'rgba(153, 102, 255, 0.1)',
+    tension: 0.1,
+    fill: true,
+  }]);
+}
+
 function updateStaleBadge(series, data) {
   setBadge(series, data.stale ? '⚠️ Stale' : null);
 }
@@ -251,7 +267,7 @@ document.getElementById('country-select').addEventListener('change', (e) => {
 
 function showFatal(message) {
   document.getElementById('last-updated').textContent = message;
-  ['prices', 'load', 'generation', 'imbalance'].forEach(s => setBadge(s, '⚠️ Error'));
+  ['prices', 'load', 'generation', 'imbalance', 'imbalance_prices'].forEach(s => setBadge(s, '⚠️ Error'));
 }
 
 async function init() {

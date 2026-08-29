@@ -1,13 +1,13 @@
-"""Normalizers turning raw ENTSO-E frames into NormalizedSeries.
+"""Normalizers turning parsed ENTSO-E data into NormalizedSeries.
 
-All provider quirks are absorbed here — nothing ENTSO-E-shaped may reach the API
-layer or the frontend. Two normalizers live here because they are two genuinely
-different shapes:
+The XML parsers hand over plain pandas objects (a Series for the scalar
+series, a B-code-keyed DataFrame for generation); this module turns them into
+the published `NormalizedSeries` contract. Two normalizers, because there are
+two genuinely different shapes:
 
-- `normalize_scalar_series` — one value per timestamp (prices, load, imbalance).
-  These three differ only in name, unit and declared resolution, so they share a
-  body; that is also why the `fetched_at` convention and the Series/DataFrame
-  coercion each exist in exactly one place.
+- `normalize_scalar_series` — one value per timestamp (prices, load,
+  imbalance volumes, imbalance prices). These differ only in name, unit and
+  fallback resolution, so they share a body.
 - `normalize_generation` — one dict of canonical categories per timestamp.
 """
 
@@ -27,29 +27,11 @@ SCALAR_SERIES = {
     "day_ahead_prices": ("EUR/MWh", 60),
     "load": ("MW", 15),
     "imbalance": ("MW", 15),
+    "imbalance_prices": ("EUR/MWh", 15),
 }
 
 GENERATION_UNIT = "MW"
 GENERATION_FALLBACK_RESOLUTION = 15
-
-
-def _to_series(data: pd.Series | pd.DataFrame, series: str) -> pd.Series:
-    """Reduce a one-value-per-timestamp result to a Series.
-
-    entsoe-py is inconsistent about this and its type hints cannot be trusted:
-    `query_day_ahead_prices` returns a Series, `query_load` returns a one-column
-    DataFrame, and `query_imbalance_volumes` is annotated `-> pd.DataFrame` but
-    actually returns a Series. Iterating a DataFrame with `.items()` yields
-    (column, Series) pairs rather than (timestamp, value), so getting this wrong
-    raises "truth value of a Series is ambiguous" on the first row.
-    """
-    if isinstance(data, pd.Series):
-        return data
-    if data.shape[1] > 1:
-        logger.warning(
-            f"{series}: expected one column, got {list(data.columns)}; using the first"
-        )
-    return data.iloc[:, 0]
 
 
 def _infer_resolution(index: pd.Index, fallback: int) -> int:
@@ -57,7 +39,8 @@ def _infer_resolution(index: pd.Index, fallback: int) -> int:
 
     Declaring it per series would be a guess: ENTSO-E resolutions change (SDAC
     has moved day-ahead prices from 60 to 15 minutes), and the value is part of
-    the published NormalizedSeries contract.
+    the published NormalizedSeries contract. The parsers fill omitted positions,
+    so within a Period the spacing is dense and the median is the true unit.
     """
     if len(index) < 2:
         return fallback
@@ -68,15 +51,22 @@ def _infer_resolution(index: pd.Index, fallback: int) -> int:
 
 
 def normalize_scalar_series(
-    data: pd.Series | pd.DataFrame,
+    values: pd.Series,
     country: str,
     series: str,
+    unit_override: str | None = None,
 ) -> NormalizedSeries:
-    """Convert a raw one-value-per-timestamp ENTSO-E result to NormalizedSeries."""
+    """Convert a parsed one-value-per-timestamp Series to NormalizedSeries.
+
+    `unit_override` replaces the declared unit — imbalance prices are settled
+    in the national currency, which only the response itself knows.
+    """
     unit, fallback_resolution = SCALAR_SERIES[series]
+    if unit_override:
+        unit = unit_override
     fetched_at = datetime.now(timezone.utc)
 
-    if data.empty:
+    if values.empty:
         logger.debug(f"Empty {series} data for {country}")
         return NormalizedSeries(
             country=country,
@@ -86,8 +76,6 @@ def normalize_scalar_series(
             points=[],
             fetched_at=fetched_at,
         )
-
-    values = _to_series(data, series)
 
     points = [
         Point(t=idx.to_pydatetime(), v=float(val))
@@ -106,31 +94,6 @@ def normalize_scalar_series(
     )
 
 
-def _generation_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Flatten entsoe-py's generation columns to plain production-type names.
-
-    Columns are a MultiIndex of (production_type, aggregation) when any fuel
-    reports consumption, and flat strings when none does. "Actual Consumption"
-    is load, not generation — counting it would inflate pumped storage.
-    """
-    keep, names = [], []
-    for col in df.columns:
-        if isinstance(col, tuple):
-            name, aggregation = col[0], (col[1] if len(col) > 1 else "")
-        else:
-            name, aggregation = col, ""
-        if aggregation == "Actual Consumption":
-            continue
-        keep.append(col)
-        names.append(name)
-
-    gen = df[keep].copy()
-    gen.columns = names
-    # min_count=1 keeps a fuel NaN when it reported nothing, rather than
-    # collapsing it to 0.0 — the distinction matters for _trim_ragged_tail.
-    return gen.T.groupby(level=0).sum(min_count=1).T
-
-
 def _trim_ragged_tail(gen: pd.DataFrame, country: str) -> pd.DataFrame:
     """Drop trailing timestamps where fuels have not all reported yet.
 
@@ -138,6 +101,7 @@ def _trim_ragged_tail(gen: pd.DataFrame, country: str) -> pd.DataFrame:
     instant, so the newest rows are typically partly filled. Those rows would
     otherwise be emitted with the missing fuels as 0.0 — indistinguishable from a
     plant genuinely producing nothing, which silently understates `latest`.
+    Complete-but-older beats recent-but-partial: an explicit product decision.
     """
     reported = gen.notna().sum(axis=1)
     if reported.empty:
@@ -156,8 +120,8 @@ def _trim_ragged_tail(gen: pd.DataFrame, country: str) -> pd.DataFrame:
     return gen.iloc[:last]
 
 
-def normalize_generation(df: pd.DataFrame, country: str) -> NormalizedSeries:
-    """Convert raw ENTSO-E generation DataFrame to NormalizedSeries."""
+def normalize_generation(gen: pd.DataFrame, country: str) -> NormalizedSeries:
+    """Convert a parsed B-code generation DataFrame to NormalizedSeries."""
     fetched_at = datetime.now(timezone.utc)
 
     def empty(resolution: int = GENERATION_FALLBACK_RESOLUTION) -> NormalizedSeries:
@@ -170,11 +134,11 @@ def normalize_generation(df: pd.DataFrame, country: str) -> NormalizedSeries:
             fetched_at=fetched_at,
         )
 
-    if df.empty:
+    if gen.empty:
         logger.debug(f"Empty generation data for {country}")
         return empty()
 
-    gen = _trim_ragged_tail(_generation_columns(df), country)
+    gen = _trim_ragged_tail(gen, country)
     if gen.empty:
         return empty()
 

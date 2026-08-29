@@ -1,9 +1,75 @@
 # Countries served by the dashboard.
 # code: ISO country code used in API URLs (?country=CZ)
-# bidding_zone: ENTSO-E area code (entsoe-py resolves "CZ" to 10YCZ-CEPS-----N)
+# eic:  ENTSO-E area code the raw REST API addresses the country by
+#       (docs/entsoe.md §5). One EIC serves every series unless overridden.
+# imbalance_eic: optional override for the two imbalance series (A85/A86).
+#       Needed for Germany: imbalance is published per control area, and the
+#       DE-LU bidding zone returns "no matching data" (verified live
+#       2026-08-25). The German imbalance price (reBAP) is identical across
+#       all four control areas, so any one of them yields the national price;
+#       the VOLUMES are that control area's only. TenneT is the largest.
 # enabled: only enabled countries get scheduled fetch jobs
 countries:
   - code: CZ
     name: Czech Republic
-    bidding_zone: CZ
+    eic: 10YCZ-CEPS-----N
+    enabled: true
+  - code: DE
+    name: Germany
+    eic: 10Y1001A1001A82H          # DE-LU bidding zone (prices, load, generation)
+    imbalance_eic: 10YDE-EON------1  # TenneT control area
+    enabled: true
+  - code: AT
+    name: Austria
+    eic: 10YAT-APG------L
+    enabled: true
+  - code: PL
+    name: Poland
+    eic: 10YPL-AREA-----S
+    enabled: true
+  - code: SK
+    name: Slovakia
+    eic: 10YSK-SEPS-----K
+    enabled: true
+
+  # --- Wider Central Europe -------------------------------------------------
+  # Added 2026-08-29. Each is a single bidding zone whose EIC serves prices,
+  # load and generation. The two imbalance series are published per CONTROL
+  # area, and coverage there is uneven across TSOs — these entries have NOT
+  # been verified live against A85/A86. A country that publishes no imbalance
+  # data degrades gracefully: the scheduler records the failed fetch in
+  # /api/health and the two imbalance charts stay empty, while the other three
+  # render normally. Add an `imbalance_eic` override (as DE has) if a control
+  # area turns out to be the right address.
+  - code: HU
+    name: Hungary
+    eic: 10YHU-MAVIR----U
+    enabled: true
+  - code: SI
+    name: Slovenia
+    eic: 10YSI-ELES-----O
+    enabled: true
+  - code: HR
+    name: Croatia
+    eic: 10YHR-HEP------M
+    enabled: true
+  - code: RO
+    name: Romania
+    eic: 10YRO-TEL------P
+    enabled: true
+  - code: CH
+    name: Switzerland
+    eic: 10YCH-SWISSGRIDZ
+    enabled: true
+  - code: FR
+    name: France
+    eic: 10YFR-RTE------C
+    enabled: true
+  - code: NL
+    name: Netherlands
+    eic: 10YNL----------L
+    enabled: true
+  - code: BE
+    name: Belgium
+    eic: 10YBE----------2
     enabled: true
