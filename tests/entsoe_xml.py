@@ -165,11 +165,16 @@ def imbalance_price_timeseries(
     resolution: str = "PT15M",
     start: datetime = START,
     currency: str = "EUR",
+    category: str | None = None,
 ) -> str:
     """An A85 imbalance-price TimeSeries. Value element is imbalance_Price.amount.
 
     Imbalance is settled in the national currency, carried in
     currency_Unit.name (CZK for ČEPS, PLN for PSE, EUR elsewhere).
+
+    `category` is imbalance_Price.category, present only under a dual-pricing
+    regime, where the same instant carries both A04 (excess balance) and A06
+    (insufficient balance).
     """
     minutes = _RESOLUTION_MINUTES[resolution]
     end = start + timedelta(minutes=minutes * len(values))
@@ -178,9 +183,15 @@ def imbalance_price_timeseries(
         for i, v in enumerate(values, start=1)
         if v is not None
     )
+    category_tag = (
+        f"<imbalance_Price.category>{category}</imbalance_Price.category>"
+        if category
+        else ""
+    )
     return (
         "<TimeSeries>"
         f"<currency_Unit.name>{currency}</currency_Unit.name>"
+        f"{category_tag}"
         "<Period>"
         f"<timeInterval><start>{_fmt(start)}</start><end>{_fmt(end)}</end></timeInterval>"
         f"<resolution>{resolution}</resolution>"

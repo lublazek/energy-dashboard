@@ -155,6 +155,40 @@ def _walk_period(period: ET.Element, value_tag: str) -> dict[datetime, float]:
     return values
 
 
+def _merge_resolution_buckets(
+    by_resolution: dict[int, dict[datetime, float]],
+) -> dict[datetime, float]:
+    """Collapse per-resolution buckets into one {timestamp: value} mapping.
+
+    A document can carry the same quantity at two resolutions — day-ahead
+    prices publish both a PT60M and a PT15M curve across the SDAC transition,
+    and generation fuels are reported at whatever MTU their party uses.
+
+    Where the curves cover the same instant the finer one wins: it is the
+    current market time unit, and mixing both into one index would garble the
+    resolution `_infer_resolution` measures off the spacing.
+
+    Where they do **not** overlap the coarse curve is kept. This is the shape
+    the transition actually takes — the switch happens on a date boundary, so
+    a 48 h window straddling it holds PT60M for day one and PT15M for day two.
+    Keeping only the finest bucket silently dropped day one entirely.
+    """
+    if len(by_resolution) == 1:
+        return next(iter(by_resolution.values()))
+
+    logger.info(
+        f"Document mixes resolutions {sorted(by_resolution)} min; the finer curve "
+        f"wins where they overlap, the coarser is kept where it does not"
+    )
+
+    # Coarsest first, so finer buckets overwrite it on shared timestamps while
+    # instants only the coarse curve covers survive.
+    merged: dict[datetime, float] = {}
+    for resolution in sorted(by_resolution, reverse=True):
+        merged.update(by_resolution[resolution])
+    return merged
+
+
 # --- public parsers -----------------------------------------------------------
 
 _SCALAR_ROOTS = (
@@ -167,6 +201,44 @@ _SCALAR_ROOTS = (
 # A02 = deficit (negative). Imbalance volumes are published unsigned with the
 # sign carried here instead.
 _FLOW_SIGN = {"A01": 1.0, "A02": -1.0}
+
+# Under a dual-pricing regime an A85 document publishes TWO prices for the same
+# instant, told apart by imbalance_Price.category (ENTSO-E PriceCategory
+# codelist: A04 = excess balance, A06 = insufficient balance). Reading the tag
+# is what makes the choice deterministic — without it the parser kept whichever
+# TimeSeries the platform happened to serialize first, so the published curve
+# could flip between two different prices from one poll to the next with
+# nothing in the data to show it had.
+_PRICE_CATEGORY_TAG = "imbalance_Price.category"
+
+# Shortage is the headline number operators watch, so A06 wins when both are
+# present. Single-price regimes emit no category at all and are unaffected.
+_PRICE_CATEGORY_PREFERENCE = ("A06", "A04")
+
+
+def _select_price_category(
+    by_category: dict[str | None, dict[int, dict[datetime, float]]],
+) -> dict[int, dict[datetime, float]]:
+    """Pick one imbalance-price category's buckets, deterministically."""
+    if len(by_category) == 1:
+        return next(iter(by_category.values()))
+
+    for preferred in _PRICE_CATEGORY_PREFERENCE:
+        if preferred in by_category:
+            logger.info(
+                f"Dual imbalance pricing: categories {sorted(map(str, by_category))} "
+                f"present, publishing {preferred}"
+            )
+            return by_category[preferred]
+
+    # Unknown categories only: sorted() keeps the pick stable across polls
+    # even though we cannot say which one is meant.
+    chosen = sorted(by_category, key=lambda c: (c is None, str(c)))[0]
+    logger.warning(
+        f"Unrecognised imbalance price categories {sorted(map(str, by_category))}; "
+        f"publishing {chosen!r}"
+    )
+    return by_category[chosen]
 
 
 def parse_scalar_xml(
@@ -185,10 +257,11 @@ def parse_scalar_xml(
     if root is None:
         return pd.Series(dtype=float)
 
-    # Bucketed per resolution: day-ahead prices can carry both PT60M and PT15M
-    # curves during the SDAC transition. Mixing them in one index would garble
-    # the measured resolution, so the finest wins (it is the current MTU).
-    by_resolution: dict[int, dict[datetime, float]] = {}
+    # Bucketed per price category, then per resolution: dual pricing splits one
+    # instant across two categories, and day-ahead prices can carry both PT60M
+    # and PT15M curves during the SDAC transition. See _select_price_category
+    # and _merge_resolution_buckets for how the buckets collapse to one curve.
+    by_category: dict[str | None, dict[int, dict[datetime, float]]] = {}
 
     for timeseries in _children(root, "TimeSeries"):
         sign = 1.0
@@ -196,6 +269,9 @@ def parse_scalar_xml(
             direction = _text(timeseries, "flowDirection.direction")
             if direction is not None:
                 sign = _FLOW_SIGN.get(direction, 1.0)
+
+        category = _text(timeseries, _PRICE_CATEGORY_TAG)
+        by_resolution = by_category.setdefault(category, {})
 
         for period in _children(timeseries, "Period"):
             resolution = _parse_resolution(period)
@@ -205,14 +281,11 @@ def parse_scalar_xml(
                 # occurrence is the more recent publication and wins.
                 bucket[timestamp] = sign * value
 
-    if not by_resolution:
+    by_category = {cat: res for cat, res in by_category.items() if res}
+    if not by_category:
         return pd.Series(dtype=float)
 
-    if len(by_resolution) > 1:
-        logger.warning(
-            f"Document mixes resolutions {sorted(by_resolution)} min; keeping the finest"
-        )
-    values = by_resolution[min(by_resolution)]
+    values = _merge_resolution_buckets(_select_price_category(by_category))
 
     series = pd.Series(values, dtype=float)
     series.index = pd.DatetimeIndex(series.index, tz="UTC")
@@ -236,7 +309,12 @@ def parse_generation_xml(xml_text: str) -> pd.DataFrame:
     if root is None:
         return pd.DataFrame()
 
-    by_code: dict[str, dict[datetime, float]] = {}
+    # Per fuel, then per resolution. Fuels are published by different parties
+    # and need not share a market time unit: a PT60M fuel unioned onto a PT15M
+    # index lands on one timestamp in four and reads as 2000, 0, 0, 0, 2000 —
+    # a sawtooth that `_trim_ragged_tail` cannot catch, because its mode-based
+    # "expected fuel count" is itself computed from the garbled frame.
+    by_code: dict[str, dict[int, dict[datetime, float]]] = {}
 
     for timeseries in _children(root, "TimeSeries"):
         if _child(timeseries, "outBiddingZone_Domain.mRID") is not None:
@@ -247,11 +325,13 @@ def parse_generation_xml(xml_text: str) -> pd.DataFrame:
             logger.warning("Generation TimeSeries without a psrType; skipping")
             continue
 
-        bucket = by_code.setdefault(code, {})
+        buckets = by_code.setdefault(code, {})
         for period in _children(timeseries, "Period"):
+            resolution = _parse_resolution(period)
+            bucket = buckets.setdefault(resolution, {})
             for timestamp, value in _walk_period(period, "quantity").items():
                 if timestamp in bucket:
-                    # Two TimeSeries reporting the same (fuel, instant) —
+                    # Two TimeSeries reporting the same (fuel, instant, MTU) —
                     # summed to match how split publications aggregate, and
                     # logged because a republication would double-count here.
                     logger.warning(f"Duplicate generation value for {code} at {timestamp}")
@@ -262,7 +342,12 @@ def parse_generation_xml(xml_text: str) -> pd.DataFrame:
     if not by_code:
         return pd.DataFrame()
 
-    frame = pd.DataFrame(by_code)
+    columns = {
+        code: _merge_resolution_buckets(buckets)
+        for code, buckets in by_code.items()
+        if buckets
+    }
+    frame = pd.DataFrame(columns)
     frame.index = pd.DatetimeIndex(frame.index, tz="UTC")
     return frame.sort_index()
 
@@ -315,7 +400,19 @@ def extract_currency(documents: list[str]) -> str | None:
 
 
 def parse_generation_documents(documents: list[str]) -> pd.DataFrame:
-    """Parse and merge every document into one B-code DataFrame."""
+    """Parse and merge every document into one B-code DataFrame.
+
+    Merged **cell by cell**, not row by row. A zipped A75 response splits fuels
+    across members, so two documents routinely cover the same timestamps with
+    different psrTypes. Dropping duplicate rows (`index.duplicated`) discards
+    every fuel the earlier document carried — and because `normalize_generation`
+    seeds all canonical categories to 0.0, the loss is published as a genuine
+    zero rather than a gap. That is silent, plausible, wrong data.
+
+    `combine_first` keeps the later document's value wherever it has one and
+    falls back to the earlier document otherwise, so the union of fuels and
+    timestamps survives and a NaN never overwrites a real reading.
+    """
     parts = [parse_generation_xml(doc) for doc in documents]
     parts = [part for part in parts if not part.empty]
     if not parts:
@@ -323,6 +420,9 @@ def parse_generation_documents(documents: list[str]) -> pd.DataFrame:
     if len(parts) == 1:
         return parts[0]
 
-    merged = pd.concat(parts)
-    merged = merged[~merged.index.duplicated(keep="last")]
+    # Documents arrive in zip-name order; later is the more recent publication,
+    # so it is the one that must win on a genuine overlap.
+    merged = parts[0]
+    for part in parts[1:]:
+        merged = part.combine_first(merged)
     return merged.sort_index()

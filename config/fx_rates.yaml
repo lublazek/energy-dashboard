@@ -1,0 +1,30 @@
+# Pinned euro reference rates — the FALLBACK only.
+#
+# backend/fx.py fetches the ECB daily fixing at runtime and uses these values
+# solely when that fetch fails. When a pinned rate is used, the series unit
+# becomes "EUR/MWh (rate <date>)" so the dashboard shows that the number was
+# converted at an old rate rather than today's.
+#
+# Values are units of the currency per 1 EUR — the ECB's own direction, so
+# EUR = amount / rate.
+#
+# Copied from the ECB fixing published on the `date` below. They drift; refresh
+# them from https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml when
+# convenient. Nothing breaks if they are stale, the staleness just becomes
+# visible in the unit.
+date: 2026-09-01
+
+rates:
+  # Currencies of the countries currently in countries.yaml
+  CZK: 24.159   # Czechia — imbalance settled in CZK
+  PLN: 4.3313   # Poland — imbalance settled in PLN
+  HUF: 366.71   # Hungary
+  RON: 5.2567   # Romania
+  CHF: 0.9394   # Switzerland
+  # Kept for countries likely to be added next
+  DKK: 7.4748
+  SEK: 11.1145
+  NOK: 10.8185
+  GBP: 0.85655
+  # Note: BGN is no longer quoted by the ECB — Bulgaria is in the euro area,
+  # so a Bulgarian area would report EUR and need no conversion at all.

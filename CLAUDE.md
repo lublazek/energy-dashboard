@@ -24,7 +24,8 @@ registry or routing layer — the scheduler calls `ENTSOEProvider` directly.
 
 ```
 Scheduler (interval job per series×country) → ENTSOEProvider.fetch() → ENTSOERawClient (HTTP)
-                                                   → xml_parsers → normalizers → NormalizedSeries
+                                          → xml_parsers → fx (money series) → normalizers
+                                                                         → NormalizedSeries
                                                                                        ↓
 Frontend (polls 60 s) ← /api/prices|load|generation|imbalance|imbalance_prices ← InMemoryStore
 ```
@@ -42,9 +43,15 @@ Frontend (polls 60 s) ← /api/prices|load|generation|imbalance|imbalance_prices
   documents (the platform zips multi-document responses — balancing data routinely arrives as
   `PK…` zip bytes; the token travels only in the `SECURITY_TOKEN` header, never the URL);
   `xml_parsers.py` holds all XML knowledge (namespace handling, position math, omitted-position
-  fill, consumption exclusion, multi-document merge); `normalizers.py` turns parsed pandas
-  objects into `NormalizedSeries`; `psr_types.py` maps psrType B-codes to canonical categories;
-  `provider.py` dispatches by series name and runs the blocking HTTP call via `asyncio.to_thread`.
+  fill, consumption exclusion, resolution merging, dual-pricing category selection, multi-document
+  merge); `normalizers.py` turns parsed pandas objects into `NormalizedSeries`; `psr_types.py`
+  maps psrType B-codes to canonical categories; `provider.py` dispatches by series name and runs
+  the blocking HTTP call via `asyncio.to_thread`.
+- `backend/fx.py` — converts the two money series to EUR against the ECB daily reference rates
+  (refreshed at most once a day, shared across all jobs). `config/fx_rates.yaml` holds pinned
+  fallback rates used only when the ECB is unreachable; a fallback conversion says so in the unit
+  (`EUR/MWh (rate 2026-08-01)`). **A currency with no rate is left in its own unit, never
+  relabelled EUR** — a CZK number under an EUR label is wrong by ~25x and reads as a price spike.
 - `backend/storage.py` — `Storage` protocol + thread-safe `InMemoryStore` (data is lost on
   restart).
 - `backend/api/routes.py` — serves the latest stored series and returns a **copy** annotated with
@@ -87,8 +94,10 @@ match `GENERATION_COLORS` in `app.js`:
 
 ## Tests
 
-`uv run pytest` — no network, no API key, ~1 s. Scope is the parsers and normalizers only, and
-that is deliberate; do not add route/scheduler/frontend tests without being asked.
+`uv run pytest` — no network, no API key, ~1 s. Scope is the parsers, normalizers and FX
+conversion only, and that is deliberate; do not add route/scheduler/frontend tests without being
+asked. `tests/test_fx.py` monkeypatches `requests.get` — the ECB feed is always a fixture, never
+a real call.
 
 `tests/entsoe_xml.py` builds raw-API-shaped XML fixtures and dies with the upstream format;
 `tests/test_normalize_generation.py` / `test_normalize_scalar.py` assert on the

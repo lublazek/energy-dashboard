@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.api.health import router as health_router
 from backend.api.routes import init_routes, router as routes_router
+from backend.fx import FXConverter
 from backend.providers.entsoe.provider import ENTSOEProvider
 from backend.scheduler import init_scheduler, shutdown_scheduler
 from backend.settings import Settings
@@ -39,10 +40,26 @@ async def lifespan(app: FastAPI):
     with open(countries_config_path) as f:
         countries_config = yaml.safe_load(f)
 
+    # Fallback FX rates only: backend/fx.py fetches the ECB daily fixing at
+    # runtime and falls back to these when it cannot. A missing file is not
+    # fatal — it just means an unreachable ECB leaves prices in their own
+    # currency instead of converting at a pinned rate.
+    fx_config_path = PROJECT_ROOT / "config" / "fx_rates.yaml"
+    fx_rates: dict = {}
+    if fx_config_path.exists():
+        with open(fx_config_path) as f:
+            fx_rates = yaml.safe_load(f) or {}
+    else:
+        logger.warning("config/fx_rates.yaml not found; no pinned FX fallback")
+
     storage = InMemoryStore()
     init_routes(storage, countries_config, settings.default_country)
 
-    provider = ENTSOEProvider(settings.entsoe_api_key, countries_config)
+    fx = FXConverter(
+        fallback_rates=fx_rates.get("rates"),
+        fallback_date=fx_rates.get("date"),
+    )
+    provider = ENTSOEProvider(settings.entsoe_api_key, countries_config, fx=fx)
 
     await init_scheduler(
         storage,

@@ -608,9 +608,15 @@ normalizers absorb every remaining quirk. entsoe-py was removed on 2026-08-25.
 | `imbalance` | `documentType=A86`, `controlArea_Domain` | `quantity` | `Balancing_MarketDocument` |
 | `imbalance_prices` | `documentType=A85`, `controlArea_Domain` | `imbalance_Price.amount` | `Balancing_MarketDocument` |
 
-Every enabled country carries one `eic` in `config/countries.yaml` that serves all five domain
-parameters. Germany uses the DE-LU bidding-zone EIC (`10Y1001A1001A82H`) — ENTSO-E aggregates the
-four German TSO control areas into it, imbalance included.
+Every enabled country carries one `eic` in `config/countries.yaml` that serves the price, load and
+generation domain parameters. Germany uses the DE-LU bidding-zone EIC (`10Y1001A1001A82H`), into
+which ENTSO-E aggregates the four German TSOs for those three series.
+
+**Imbalance is the exception.** A85/A86 are published per *control area*, not per bidding zone,
+and the DE-LU zone returns "no matching data" for both (verified live 2026-08-25). A country can
+therefore carry an optional `imbalance_eic` that the two imbalance series use instead — Germany
+points at TenneT (`10YDE-EON------1`). The reBAP price is identical across all four German control
+areas so the price is national, but the *volumes* are that one control area's only.
 
 Quirks the code absorbs, learned by running it:
 
@@ -621,7 +627,17 @@ Quirks the code absorbs, learned by running it:
 - **Imbalance volumes are published unsigned**, with the sign in the TimeSeries'
   `flowDirection.direction` (`A01` = surplus → positive, `A02` = deficit → negated).
 - **Imbalance prices are settled in the national currency** — CZK for ČEPS, PLN for PSE — carried
-  in `currency_Unit.name`. The unit is read from the response, never declared.
+  in `currency_Unit.name`. The unit is read from the response, never declared. `backend/fx.py`
+  then converts to EUR against the ECB daily reference rates so the countries share one axis; a
+  currency it cannot price is left in its own unit rather than relabelled EUR.
+- **Dual pricing publishes two prices for one instant**, told apart by `imbalance_Price.category`
+  (`A04` excess balance, `A06` insufficient balance). The parser reads the tag and always
+  publishes A06; ignoring it meant keeping whichever TimeSeries was serialized first, which could
+  flip between polls.
+- **One quantity can arrive at two resolutions.** Day-ahead prices carry both a PT60M and a PT15M
+  curve across the SDAC transition, and generation fuels are reported at whatever MTU their party
+  uses. The finer curve wins where they overlap; where they do not — the transition falls on a
+  date boundary — the coarse curve is kept rather than discarded.
 - **Omitted positions repeat the previous value** (see below); the parser fills them, so NaN in
   parsed output means "this TimeSeries genuinely ends here", which is what the ragged-tail trim
   keys on.
